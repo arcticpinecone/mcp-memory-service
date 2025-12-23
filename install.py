@@ -37,12 +37,17 @@ except ImportError:
 # Fix Windows console encoding issues
 if platform.system() == "Windows":
     # Ensure stdout uses UTF-8 on Windows to prevent character encoding issues in logs
-    if hasattr(sys.stdout, 'reconfigure'):
-        try:
-            sys.stdout.reconfigure(encoding='utf-8')
-            sys.stderr.reconfigure(encoding='utf-8')
-        except AttributeError:
-            pass
+    try:
+        # Use getattr to avoid static analyzers complaining about unknown TextIO attributes.
+        reconfig_out = getattr(sys.stdout, "reconfigure", None)
+        if callable(reconfig_out):
+            reconfig_out(encoding="utf-8")
+        reconfig_err = getattr(sys.stderr, "reconfigure", None)
+        if callable(reconfig_err):
+            reconfig_err(encoding="utf-8")
+    except Exception:
+        # Silently ignore if reconfigure isn't available or fails at runtime
+        pass
 
 # Enhanced logging system for installer
 import logging
@@ -173,19 +178,58 @@ def cleanup_installer_logging():
 
 # Import Claude commands utilities
 try:
-    from scripts.claude_commands_utils import install_claude_commands, check_claude_code_cli
+    from scripts.claude_commands_utils import install_claude_commands, check_claude_code_cli  # type: ignore[import-not-found]
 except ImportError:
     # Handle case where script is run from different directory
     script_dir = Path(__file__).parent
     sys.path.insert(0, str(script_dir))
     try:
-        from scripts.claude_commands_utils import install_claude_commands, check_claude_code_cli
+        from scripts.claude_commands_utils import install_claude_commands, check_claude_code_cli  # type: ignore[import-not-found]
     except ImportError:
-        install_claude_commands = None
-        check_claude_code_cli = None
+        install_claude_commands = None  # type: ignore[assignment]
+        check_claude_code_cli = None  # type: ignore[assignment]
 
 # Global variable to store the uv executable path
 UV_EXECUTABLE_PATH = None
+
+# Global flag to prefer uv over pip when both are available
+PREFER_UV = False
+
+
+def _get_installer_cmd():
+    """Get the best available installer command.
+    
+    This helper detects uv/pip availability and returns an appropriate
+    installer command. Respects the global PREFER_UV flag.
+    
+    Returns:
+        list: Command prefix for package installation (e.g., ['uv', 'pip'] or [sys.executable, '-m', 'pip'])
+    """
+    global UV_EXECUTABLE_PATH, PREFER_UV
+    
+    # Check for uv availability
+    uv_path = UV_EXECUTABLE_PATH or shutil.which("uv")
+    
+    # Check for pip availability
+    pip_available = False
+    try:
+        subprocess.check_call([sys.executable, '-m', 'pip', '--version'],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+        pip_available = True
+    except subprocess.SubprocessError:
+        pass
+    
+    # Prefer uv if requested and available, or if pip is not available
+    if uv_path and (PREFER_UV or not pip_available):
+        return [uv_path, 'pip']
+    elif pip_available:
+        return [sys.executable, '-m', 'pip']
+    elif uv_path:
+        return [uv_path, 'pip']
+    else:
+        # Fallback - return pip command and let it fail with a clear error
+        return [sys.executable, '-m', 'pip']
 
 def print_header(text):
     """Print a formatted header."""
@@ -437,7 +481,7 @@ def check_dependencies():
     except subprocess.SubprocessError:
         # Fallback to import check
         try:
-            import pip
+            import pip  # type: ignore[import-not-found]
             pip_installed = True
             print_info(f"pip is installed: {pip.__version__}")
         except ImportError:
@@ -480,7 +524,7 @@ def check_dependencies():
     
     # Check for wheel
     try:
-        import wheel
+        import wheel  # type: ignore[import-not-found]
         print_info(f"wheel is installed: {wheel.__version__}")
     except ImportError:
         print_warning("wheel is not installed. Will attempt to install it.")
@@ -527,11 +571,14 @@ def install_pytorch_macos_intel():
     """Install PyTorch specifically for macOS with Intel CPUs."""
     print_step("3a", "Installing PyTorch for macOS Intel CPU")
     
+    # Define python_version at function scope for use in exception handler
+    python_version = sys.version_info
+    torch_version = ""  # Will be set based on Python version
+    st_version = ""  # Will be set based on Python version
+    
     # Use the versions known to work well on macOS Intel and with Python 3.13+
     try:
         # For Python 3.13+, we need newer PyTorch versions
-        python_version = sys.version_info
-        
         if python_version >= (3, 13):
             # For Python 3.13+, try to install latest compatible version
             print_info(f"Installing PyTorch for macOS Intel (Python {python_version.major}.{python_version.minor})...")
@@ -685,7 +732,7 @@ def install_pytorch_windows(gpu_info):
                 
                 # Check if torch-directml is also installed
                 try:
-                    import torch_directml
+                    import torch_directml  # type: ignore[import-not-found]
                     directml_version = getattr(torch_directml, '__version__', 'Unknown version')
                     print_success(f"torch-directml {directml_version} is already installed")
                     return True  # Everything is compatible, no need to reinstall
@@ -1220,9 +1267,14 @@ def install_uv():
 def _setup_installer_command():
     """Set up the installer command prefix (pip or uv).
     
+    Respects the global PREFER_UV flag. When set, uv will be used if available.
+    Otherwise, pip is preferred when available.
+    
     Returns:
         tuple: (installer_cmd: list, uv_path: str or None)
     """
+    global UV_EXECUTABLE_PATH, PREFER_UV
+    
     # Detect if pip is available
     pip_available = False
     try:
@@ -1233,25 +1285,30 @@ def _setup_installer_command():
     except subprocess.SubprocessError:
         pip_available = False
 
-    # Try to install uv if pip is not available
-    if not pip_available:
+    # Check if uv is already available
+    uv_path = shutil.which("uv")
+    
+    # Try to install uv if pip is not available and uv is not found
+    if not pip_available and not uv_path:
         print_info("pip not found, attempting to install uv package manager...")
         uv_path = install_uv()
-    else:
-        # Check if uv is already available
-        uv_path = shutil.which("uv")
-        if uv_path:
-            print_info(f"uv package manager found at: {uv_path}")
-        else:
-            print_info("uv package manager not found (will use pip for installation)")
+    elif uv_path:
+        print_info(f"uv package manager detected at: {uv_path}")
+    
+    if pip_available and not uv_path:
+        print_info("Using pip for installation (uv not found)")
     
     # Store the uv path globally for config generation
-    global UV_EXECUTABLE_PATH
     UV_EXECUTABLE_PATH = uv_path
 
-    # Decide installer command prefix
-    if pip_available:
+    # Decide installer command prefix based on preference and availability
+    if PREFER_UV and uv_path:
+        installer_cmd = [uv_path, 'pip']
+        print_info(f"Using uv for installation (--prefer-uv): {uv_path}")
+    elif pip_available:
         installer_cmd = [sys.executable, '-m', 'pip']
+        if uv_path:
+            print_info("Using pip for installation (use --prefer-uv to use uv instead)")
     elif uv_path:
         installer_cmd = [uv_path, 'pip']
         print_info(f"Using uv for installation: {uv_path}")
@@ -1412,8 +1469,10 @@ def _install_with_onnx(installer_cmd, install_mode, chosen_backend, env, using_h
             dependencies.append("chromadb==0.5.23")
             dependencies.append("tokenizers==0.20.3")
         
-        # Install dependencies
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + dependencies)
+        # Install dependencies using the detected installer
+        dep_cmd = installer_cmd + ['install'] + dependencies
+        print_info(f"Running: {' '.join(dep_cmd)}")
+        subprocess.check_call(dep_cmd)
         
         # Configure ONNX runtime
         print_info("Configuring to use ONNX runtime for inference without PyTorch...")
@@ -1698,7 +1757,7 @@ def verify_installation():
             return False
     elif storage_backend == 'chromadb':
         try:
-            import chromadb
+            import chromadb  # type: ignore[import-not-found]
             print_success(f"ChromaDB is installed: {chromadb.__version__}")
         except ImportError:
             print_error("ChromaDB is not installed correctly")
@@ -1706,7 +1765,7 @@ def verify_installation():
     
     # Check for ONNX runtime
     try:
-        import onnxruntime
+        import onnxruntime  # type: ignore[import-not-found]
         print_success(f"ONNX Runtime is installed: {onnxruntime.__version__}")
         use_onnx = os.environ.get('MCP_MEMORY_USE_ONNX', '').lower() in ('1', 'true', 'yes')
         if use_onnx:
@@ -1714,7 +1773,8 @@ def verify_installation():
             # Check for tokenizers (required for ONNX)
             try:
                 import tokenizers
-                print_success(f"Tokenizers is installed: {tokenizers.__version__}")
+                tokenizers_version = getattr(tokenizers, '__version__', 'Unknown version')
+                print_success(f"Tokenizers is installed: {tokenizers_version}")
             except ImportError:
                 print_warning("Tokenizers not installed but required for ONNX embeddings")
                 print_info("Install with: pip install tokenizers>=0.20.0")
@@ -1738,7 +1798,8 @@ def verify_installation():
         
         # Check for CUDA
         if torch.cuda.is_available():
-            print_success(f"CUDA is available: {torch.version.cuda}")
+            cuda_version = torch.version.cuda if hasattr(torch, 'version') and hasattr(torch.version, 'cuda') else 'Unknown'  # type: ignore[attr-defined]
+            print_success(f"CUDA is available: {cuda_version}")
             print_info(f"GPU: {torch.cuda.get_device_name(0)}")
         # Check for MPS (Apple Silicon)
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
@@ -1746,7 +1807,7 @@ def verify_installation():
         # Check for DirectML
         else:
             try:
-                import torch_directml
+                import torch_directml  # type: ignore[import-not-found]
                 version = getattr(torch_directml, '__version__', 'Unknown version')
                 print_success(f"DirectML is available: {version}")
             except ImportError:
@@ -1780,8 +1841,9 @@ def verify_installation():
             
             if pytorch_installed:
                 # Verify compatibility between torch and sentence-transformers
+                import torch as torch_check  # Re-import to ensure it's in scope
                 st_version = sentence_transformers.__version__.split('.')
-                torch_version = torch.__version__.split('.')
+                torch_version = torch_check.__version__.split('.')
                 
                 st_major, st_minor = int(st_version[0]), int(st_version[1])
                 torch_major, torch_minor = int(torch_version[0]), int(torch_version[1])
@@ -2229,6 +2291,7 @@ def configure_claude_code_integration(system_info):
 
 def detect_mcp_clients():
     """Detect installed MCP-compatible applications."""
+    import json  # Import here to avoid issues with module availability
     clients = {}
     
     # Check for Claude Desktop
@@ -2259,7 +2322,6 @@ def detect_mcp_clients():
     for path in vscode_settings_paths:
         if path.exists():
             try:
-                import json
                 with open(path, 'r') as f:
                     settings = json.load(f)
                 # Check for MCP-related extensions or configurations
@@ -2301,7 +2363,6 @@ def detect_mcp_clients():
     for path in cursor_settings_paths:
         if path.exists():
             try:
-                import json
                 with open(path, 'r') as f:
                     settings = json.load(f)
                 # Check for MCP-related configurations
@@ -2757,6 +2818,8 @@ def _parse_arguments():
                         help='Skip the interactive prompt for Claude Code commands')
     parser.add_argument('--non-interactive', action='store_true',
                         help='Run in non-interactive mode using default values for all prompts')
+    parser.add_argument('--prefer-uv', action='store_true',
+                        help='Prefer uv package manager over pip when both are available')
     
     return parser.parse_args()
 
@@ -3043,6 +3106,13 @@ def _prompt_for_claude_commands(args):
 def _install_claude_commands_internal():
     """Install Claude Code commands."""
     print_step("7", "Installing Claude Code Commands")
+    
+    if install_claude_commands is None:
+        print_warning("Claude Code commands utility not available")
+        print_info("You can install them manually later with:")
+        print_info("python scripts/claude_commands_utils.py")
+        return
+    
     try:
         if install_claude_commands(verbose=True):
             print_success("Claude Code commands installed successfully!")
@@ -3199,7 +3269,15 @@ def _cleanup_and_exit(log_file_path):
 
 def main():
     """Main installation function."""
+    global PREFER_UV
+    
     args = _parse_arguments()
+    
+    # Set global preference for uv if requested
+    if hasattr(args, 'prefer_uv') and args.prefer_uv:
+        PREFER_UV = True
+        print_info("uv package manager will be preferred over pip")
+    
     _handle_special_modes(args)
     
     log_file_path, system_info = _setup_logging_and_detect_system(args)

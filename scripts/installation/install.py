@@ -179,6 +179,101 @@ def run_command_safe(cmd, success_msg=None, error_msg=None, silent=False,
         print_error(permission_msg)
         return False, None
 
+def install_package(args):
+    """Install the MCP Memory Service package.
+    
+    Args:
+        args: Parsed command line arguments
+        
+    Returns:
+        bool: True if installation succeeded, False otherwise
+    """
+    print_step("3", "Installing MCP Memory Service")
+    
+    # Detect system and GPU
+    system_info = detect_system()
+    gpu_info = detect_gpu()
+    
+    # Detect installer command (pip or uv)
+    installer_cmd = _detect_installer_command()
+    if installer_cmd is None:
+        return False
+    
+    # Determine install mode (editable or standard)
+    install_mode = ['-e'] if args.dev else []
+    
+    # Environment variables to set
+    env = {}
+    
+    # Choose and install storage backend
+    chosen_backend = choose_storage_backend(system_info, gpu_info, args)
+    
+    # Check if chromadb was chosen but flag not provided
+    if chosen_backend == "chromadb" and not args.with_chromadb:
+        print_warning("ChromaDB backend selected but --with-chromadb flag not provided")
+        print_info("ChromaDB requires heavy ML dependencies (~1-2GB).")
+        print_info("To use ChromaDB, run: python scripts/installation/install.py --with-chromadb")
+        print_info("Switching to SQLite-vec backend instead...")
+        chosen_backend = "sqlite_vec"
+    
+    # ChromaDB automatically includes ML dependencies
+    if args.with_chromadb:
+        args.with_ml = True
+    
+    if chosen_backend == "auto_detect":
+        if not args.with_chromadb:
+            print_info("Auto-detection: Using SQLite-vec (lightweight option)")
+            chosen_backend = "sqlite_vec"
+        else:
+            actual_backend = install_storage_backend(chosen_backend, system_info)
+            if not actual_backend:
+                print_error("Failed to install any storage backend")
+                return False
+            chosen_backend = actual_backend
+    else:
+        if not install_storage_backend(chosen_backend, system_info):
+            print_error(f"Failed to install {chosen_backend} storage backend")
+            return False
+    
+    # Set environment variable for chosen backend
+    if chosen_backend in ["sqlite_vec", "hybrid", "cloudflare"]:
+        env['MCP_MEMORY_STORAGE_BACKEND'] = chosen_backend
+        os.environ['MCP_MEMORY_STORAGE_BACKEND'] = chosen_backend
+    else:
+        env['MCP_MEMORY_STORAGE_BACKEND'] = 'chromadb'
+        os.environ['MCP_MEMORY_STORAGE_BACKEND'] = 'chromadb'
+    
+    # Determine install target based on options
+    install_target = ['.']
+    
+    if args.with_chromadb:
+        install_target = ['.[chromadb]']
+        print_info("Installing with ChromaDB backend support (includes ML dependencies)")
+    elif args.with_ml:
+        if chosen_backend == "sqlite_vec":
+            install_target = ['.[sqlite-ml]']
+            print_info("Installing SQLite-vec with full ML capabilities")
+        else:
+            install_target = ['.[ml]']
+            print_info("Installing with ML dependencies")
+    elif chosen_backend == "sqlite_vec":
+        install_target = ['.[sqlite]']
+        print_info("Installing SQLite-vec with lightweight ONNX embeddings")
+    else:
+        print_info("Installing lightweight version (no ML dependencies)")
+    
+    # Build and run the install command
+    cmd = installer_cmd + ['install'] + install_mode + install_target
+    
+    success, _ = run_command_safe(
+        cmd,
+        success_msg="MCP Memory Service installed successfully",
+        error_msg="Failed to install MCP Memory Service",
+        silent=False
+    )
+    
+    return success
+
 def install_package_safe(package, success_msg=None, error_msg=None, fallback_in_venv=True):
     """
     Install a Python package with standardized error handling.

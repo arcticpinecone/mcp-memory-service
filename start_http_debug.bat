@@ -55,6 +55,10 @@ set MCP_HTTPS_ENABLED=false
 set MCP_MDNS_ENABLED=true
 set MCP_MDNS_SERVICE_NAME=MCP-Memory-Service-Debug
 
+REM Disable OAuth for local debug mode (allows anonymous access)
+set MCP_OAUTH_ENABLED=false
+set MCP_ALLOW_ANONYMOUS_ACCESS=true
+
 REM Fix Transformers cache warning
 set HF_HOME=%USERPROFILE%\.cache\huggingface
 set TRANSFORMERS_CACHE=%USERPROFILE%\.cache\huggingface\transformers

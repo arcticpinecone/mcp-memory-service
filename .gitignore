@@ -65,8 +65,11 @@ __pypackages__/
 # IDEs & Editors
 .idea/
 .vscode/
+.vs/
 *.swp
 *.swo
+*.sublime-project
+*.sublime-workspace
 
 # OS-specific files
 .DS_Store

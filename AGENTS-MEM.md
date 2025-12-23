@@ -352,6 +352,7 @@ openssl rand -base64 32
 ```
 
 **Recommendations**:
+
 - Minimum 32 characters
 - Mix of alphanumeric characters
 - Avoid special characters that may need escaping in shells
